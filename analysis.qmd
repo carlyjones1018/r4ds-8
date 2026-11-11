@@ -11,3 +11,93 @@ execute:
 library(tidyverse)
 library(arrow)
 ```
+
+```{r}
+#| cache: true
+markets <- arrow::read_parquet("data/markets.parquet")
+
+joined <- arrow::read_parquet("data/history.parquet") |>
+  left_join(markets |> select(market_id, outcome, resolved_at), by = "market_id") |>
+  mutate(
+    outcome_numeric = if_else(outcome == "YES", 1, 0),
+    days_to_resolution = as.Date(substr(resolved_at, 1, 10)) - date,
+    time_bucket = factor(
+      case_when(
+        days_to_resolution > 90 ~ "More than 90 days",
+        days_to_resolution >= 30 ~ "30 to 90 days",
+        days_to_resolution >= 7 ~ "7 to 30 days",
+        days_to_resolution >= 1 ~ "1 to 7 days",
+        days_to_resolution == 0 ~ "Final day"
+      ),
+      levels = c(
+        "More than 90 days",
+        "30 to 90 days",
+        "7 to 30 days",
+        "1 to 7 days",
+        "Final day"
+      )
+    )
+  )
+
+groups <- arrow::read_parquet("data/groups.parquet")
+market_groups <- arrow::read_parquet("data/market_groups.parquet")
+```
+
+```{r}
+accuracy <- joined |>
+  group_by(time_bucket) |>
+  summarise(
+    mean_prediction_error = mean(abs(probability - outcome_numeric), na.rm = TRUE),
+    n_snapshots = n(),
+    .groups = "drop"
+  )
+
+print(accuracy)
+
+ggplot(accuracy, aes(x = time_bucket, y = mean_prediction_error, group = 1)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Prediction markets get smarter near the deadline",
+    subtitle = "Mean absolute error in Manifold Markets forecasts, by days remaining",
+    x = "Time until resolution",
+    y = "Mean absolute error"
+  )
+```
+
+```{r}
+final_day <- joined |>
+  filter(days_to_resolution == 0)
+
+ggplot(final_day, aes(x = probability)) +
+  geom_histogram()
+```
+
+```{r}
+calibration <- final_day |>
+  mutate(probability_bin = cut(
+    probability,
+    breaks = seq(0, 1, by = 0.1),
+    include.lowest = TRUE
+  )) |>
+  group_by(probability_bin) |>
+  summarise(
+    actual_rate = mean(outcome_numeric),
+    n = n(),
+    .groups = "drop"
+  )
+
+print(calibration)
+
+ggplot(calibration, aes(x = as.numeric(probability_bin) / 10 - 0.05, y = actual_rate)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(aes(size = n)) +
+  scale_x_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  scale_y_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  labs(
+    title = "Final-day forecasts are closest to calibrated at the extremes",
+    x = "Predicted probability",
+    y = "Actual YES resolution rate",
+    size = "Markets"
+  )
+```
